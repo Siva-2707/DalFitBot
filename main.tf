@@ -1,0 +1,402 @@
+variable "aws_region" {
+  description = "AWS region to deploy resources"
+  type        = string
+  default     = "us-east-1"
+}
+
+provider "aws" {
+  region     = var.aws_region
+}
+
+resource "aws_vpc" "main" {
+  cidr_block           = "10.0.0.0/16"
+  enable_dns_hostnames = true
+  tags = { Name = "fastapi-vpc" }
+}
+
+resource "aws_subnet" "public" {
+  vpc_id                  = aws_vpc.main.id
+  cidr_block              = "10.0.1.0/24"
+  availability_zone       = "us-east-1a"
+  map_public_ip_on_launch = true
+  tags = { Name = "public-subnet" }
+}
+
+resource "aws_subnet" "private" {
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = "10.0.2.0/24"
+  availability_zone = "us-east-1a"
+  tags = { Name = "private-subnet" }
+}
+
+resource "aws_internet_gateway" "gw" {
+  vpc_id = aws_vpc.main.id
+}
+
+resource "aws_route_table" "public" {
+  vpc_id = aws_vpc.main.id
+
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.gw.id
+  }
+}
+
+resource "aws_route_table_association" "public_assoc" {
+  subnet_id      = aws_subnet.public.id
+  route_table_id = aws_route_table.public.id
+}
+
+resource "aws_security_group" "ec2_sg" {
+  name        = "ec2-fastapi-sg"
+  description = "Allow HTTP from NLB"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+data "aws_ami" "amazon_linux" {
+  most_recent = true
+  owners      = ["amazon"]
+
+  filter {
+    name   = "name"
+    values = ["amzn2-ami-hvm-*-x86_64-gp2"]
+  }
+}
+
+resource "aws_eip" "nat" {
+  domain = "vpc"
+}
+
+resource "aws_nat_gateway" "this" {
+  allocation_id = aws_eip.nat.id
+  subnet_id     = aws_subnet.public.id
+}
+
+resource "aws_route_table" "private" {
+  vpc_id = aws_vpc.main.id
+
+  route {
+    cidr_block     = "0.0.0.0/0"
+    nat_gateway_id = aws_nat_gateway.this.id
+  }
+}
+
+resource "aws_route_table_association" "private" {
+  subnet_id      = aws_subnet.private.id
+  route_table_id = aws_route_table.private.id
+}
+
+resource "aws_instance" "fastapi_ec2" {
+  ami                         = data.aws_ami.amazon_linux.id
+  instance_type               = "t3.large"
+  subnet_id                   = aws_subnet.private.id
+  vpc_security_group_ids      = [aws_security_group.ec2_sg.id]
+  associate_public_ip_address = false
+
+  user_data = <<-EOF
+              #!/bin/bash
+              yum update -y
+              amazon-linux-extras install docker -y
+              service docker start
+              usermod -aG docker ec2-user
+
+              yum install -y git
+              curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+              chmod +x /usr/local/bin/docker-compose
+
+              cd /home/ec2-user
+              git clone https://github.com/Siva-2707/DalFitBot.git app
+              cd app/backend
+              docker-compose up -d
+              EOF
+
+  tags = { Name = "fastapi-ec2" }
+}
+
+resource "aws_lb" "nlb" {
+  name               = "fastapi-nlb"
+  internal           = false
+  load_balancer_type = "network"
+  subnets            = [aws_subnet.public.id]
+}
+
+resource "aws_lb_target_group" "tg" {
+  name        = "fastapi-tg"
+  port        = 80
+  protocol    = "TCP"
+  target_type = "instance"
+  vpc_id      = aws_vpc.main.id
+}
+
+resource "aws_lb_target_group_attachment" "tg_attachment" {
+  target_group_arn = aws_lb_target_group.tg.arn
+  target_id        = aws_instance.fastapi_ec2.id
+  port             = 80
+}
+
+resource "aws_lb_listener" "nlb_listener" {
+  load_balancer_arn = aws_lb.nlb.arn
+  port              = 80
+  protocol          = "TCP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.tg.arn
+  }
+}
+
+resource "aws_apigatewayv2_vpc_link" "vpc_link" {
+  name               = "fastapi-vpc-link"
+  subnet_ids         = [aws_subnet.public.id]
+  security_group_ids = [aws_security_group.ec2_sg.id]
+}
+
+resource "aws_apigatewayv2_api" "http_api" {
+  name          = "fastapi-http-api"
+  protocol_type = "HTTP"
+}
+
+resource "aws_apigatewayv2_integration" "http_integration" {
+  api_id                 = aws_apigatewayv2_api.http_api.id
+  integration_type       = "HTTP_PROXY"
+  integration_uri        = aws_lb_listener.nlb_listener.arn
+  integration_method     = "ANY"
+  connection_type        = "VPC_LINK"
+  connection_id          = aws_apigatewayv2_vpc_link.vpc_link.id
+  payload_format_version = "1.0"
+}
+
+resource "aws_apigatewayv2_route" "http_route" {
+  api_id    = aws_apigatewayv2_api.http_api.id
+  route_key = "ANY /{proxy+}"
+  target    = "integrations/${aws_apigatewayv2_integration.http_integration.id}"
+}
+
+resource "aws_apigatewayv2_stage" "http_stage" {
+  api_id      = aws_apigatewayv2_api.http_api.id
+  name        = "$default"
+  auto_deploy = true
+}
+
+resource "aws_cognito_user_pool" "chat_user_pool" {
+  name = "chat-app-user-pool"
+}
+
+resource "aws_cognito_user_pool_domain" "my_domain" {
+  domain       = "dalfitbot-auth"
+  user_pool_id = aws_cognito_user_pool.chat_user_pool.id
+}
+
+resource "aws_cognito_user_pool_client" "chat_client" {
+  name                          = "chat-app-client"
+  user_pool_id                  = aws_cognito_user_pool.chat_user_pool.id
+  generate_secret               = false
+  allowed_oauth_flows           = ["code"]
+  allowed_oauth_scopes          = ["email", "openid", "profile"]
+  callback_urls                 = ["http://localhost:5173"]
+  allowed_oauth_flows_user_pool_client = true
+  supported_identity_providers  = ["COGNITO"]
+}
+
+resource "aws_wafv2_web_acl" "chat_acl" {
+  name  = "chat-waf-acl"
+  scope = "REGIONAL"
+
+  default_action {
+    allow {}
+  }
+
+  rule {
+    name     = "RateLimitRule"
+    priority = 1
+
+    action {
+      block {}
+    }
+
+    statement {
+      rate_based_statement {
+        limit              = 1000
+        aggregate_key_type = "IP"
+      }
+    }
+
+    visibility_config {
+      sampled_requests_enabled   = true
+      cloudwatch_metrics_enabled = true
+      metric_name                = "rateLimit"
+    }
+  }
+
+  visibility_config {
+    cloudwatch_metrics_enabled = true
+    sampled_requests_enabled   = true
+    metric_name                = "chatACL"
+  }
+}
+
+resource "aws_api_gateway_rest_api" "chat_api" {
+  name = "chat-api"
+}
+
+resource "aws_api_gateway_resource" "chat_resource" {
+  rest_api_id = aws_api_gateway_rest_api.chat_api.id
+  parent_id   = aws_api_gateway_rest_api.chat_api.root_resource_id
+  path_part   = "chat"
+}
+
+resource "aws_api_gateway_authorizer" "cognito_auth" {
+  name            = "chat-cognito-auth"
+  rest_api_id     = aws_api_gateway_rest_api.chat_api.id
+  type            = "COGNITO_USER_POOLS"
+  provider_arns   = [aws_cognito_user_pool.chat_user_pool.arn]
+  identity_source = "method.request.header.Authorization"
+}
+
+resource "aws_api_gateway_method" "chat_post" {
+  rest_api_id   = aws_api_gateway_rest_api.chat_api.id
+  resource_id   = aws_api_gateway_resource.chat_resource.id
+  http_method   = "POST"
+  authorization = "COGNITO_USER_POOLS"
+  authorizer_id = aws_api_gateway_authorizer.cognito_auth.id
+}
+
+resource "aws_api_gateway_integration" "chat_integration" {
+  rest_api_id             = aws_api_gateway_rest_api.chat_api.id
+  resource_id             = aws_api_gateway_resource.chat_resource.id
+  http_method             = aws_api_gateway_method.chat_post.http_method
+  integration_http_method = "POST"
+  type                    = "HTTP"
+  uri                     = "http://${aws_lb.nlb.dns_name}/chat"
+}
+
+resource "aws_api_gateway_deployment" "chat_deploy" {
+  depends_on  = [aws_api_gateway_integration.chat_integration]
+  rest_api_id = aws_api_gateway_rest_api.chat_api.id
+  # stage_name  = "prod"
+}
+
+resource "aws_api_gateway_stage" "chat_stage" {
+  rest_api_id  = aws_api_gateway_rest_api.chat_api.id
+  stage_name   = "prod"
+  deployment_id = aws_api_gateway_deployment.chat_deploy.id
+}
+
+resource "aws_wafv2_web_acl_association" "api_waf_attach" {
+  resource_arn = aws_api_gateway_stage.chat_stage.arn
+  web_acl_arn  = aws_wafv2_web_acl.chat_acl.arn
+}
+
+# New Security Group for React EC2 allowing HTTP inbound from anywhere
+resource "aws_security_group" "react_ec2_sg" {
+  name        = "react-ec2-sg"
+  description = "Allow HTTP traffic from anywhere"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    description = "HTTP from anywhere"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  ingress {
+    description = "SSH from anywhere"
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "react-ec2-sg"
+  }
+}
+
+# EC2 instance for React App in public subnet with public IP
+resource "aws_instance" "react_ec2" {
+  ami                         = data.aws_ami.amazon_linux.id
+  instance_type               = "t3.micro"
+  subnet_id                   = aws_subnet.public.id
+  vpc_security_group_ids      = [aws_security_group.react_ec2_sg.id]
+  associate_public_ip_address = true
+
+  user_data = <<-EOF
+              #!/bin/bash
+              yum update -y
+              amazon-linux-extras install docker git -y
+              service docker start
+              usermod -aG docker ec2-user
+
+              cd /home/ec2-user
+
+              if [ ! -d app ]; then
+                git clone https://github.com/Siva-2707/DalFitBot.git app
+              fi
+
+              # Make sure the app directory exists before creating .env
+              cat > /home/ec2-user/app/.env <<EOL
+              REACT_APP_AWS_REGION=${var.aws_region}
+              REACT_APP_USER_POOL_ID=${aws_cognito_user_pool.chat_user_pool.id}
+              REACT_APP_USER_POOL_CLIENT_ID=${aws_cognito_user_pool_client.chat_client.id}
+              REACT_APP_COGNITO_DOMAIN=${aws_cognito_user_pool_domain.my_domain.domain}
+              REACT_APP_REDIRECT_SIGN_IN=http://$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4):80/
+              REACT_APP_REDIRECT_SIGN_OUT=http://$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4):80/
+              EOL
+
+              chown ec2-user:ec2-user /home/ec2-user/app/frontend/.env
+
+              cd /home/ec2-user/app/frontend
+
+              # Build Docker image
+              docker build -t react-frontend .
+
+              # Stop and remove any existing container named react-frontend
+              docker rm -f react-frontend || true
+
+              # Run the container mapping port 80
+              docker run -d --name react-frontend -p 80:80 react-frontend
+              EOF
+
+  tags = {
+    Name = "react-ec2"
+  }
+}
+
+
+output "user_pool_id" {
+  value = aws_cognito_user_pool.chat_user_pool.id
+}
+
+output "user_pool_client_id" {
+  value = aws_cognito_user_pool_client.chat_client.id
+}
+
+output "region" {
+  value = var.aws_region
+}
+
+output "cognito_domain" {
+  value = aws_cognito_user_pool_domain.my_domain.domain
+}

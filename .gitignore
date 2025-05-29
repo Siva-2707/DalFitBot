@@ -1,0 +1,7 @@
+/frontendbck
+terraform.tfstate
+terraform.tfstate.backup
+.terraform/
+.terraform.lock.hcl
+.DS_Store
+__pycache__/
