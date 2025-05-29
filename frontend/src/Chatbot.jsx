@@ -1,12 +1,12 @@
 import React, { useState } from "react";
-import { Auth } from "aws-amplify";
+import { fetchAuthSession } from '@aws-amplify/auth';
 
 function Chatbot({ user }) {
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState([]);
 
   const sendMessage = async () => {
-    const session = await Auth.currentSession();
+    const session = await fetchAuthSession();
     const token = session.getIdToken().getJwtToken();
 
     const response = await fetch(`${process.env.REACT_APP_CHAT_API_URL}/chat`, {

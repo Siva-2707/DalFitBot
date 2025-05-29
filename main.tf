@@ -109,22 +109,41 @@ resource "aws_instance" "fastapi_ec2" {
 
   user_data = <<-EOF
               #!/bin/bash
+              set -e
+
+              # Update packages
               yum update -y
-              amazon-linux-extras install docker -y
+
+              # Enable Docker and install necessary packages
+              amazon-linux-extras enable docker
+              yum install -y docker git
+
+              # Start Docker and add ec2-user to docker group
               service docker start
               usermod -aG docker ec2-user
 
-              yum install -y git
-              curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+              # Install Docker Compose
+              curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" \
+                -o /usr/local/bin/docker-compose
               chmod +x /usr/local/bin/docker-compose
 
-              cd /home/ec2-user
-              git clone https://github.com/Siva-2707/DalFitBot.git app
-              cd app/backend
-              docker-compose up -d
+              # Run as ec2-user
+              sudo -u ec2-user bash -c '
+                cd /home/ec2-user
+
+                if [ ! -d app ]; then
+                  git clone https://github.com/Siva-2707/DalFitBot.git app
+                fi
+
+                cd app/backend
+
+                docker-compose up -d
+              '
               EOF
 
-  tags = { Name = "fastapi-ec2" }
+  tags = {
+    Name = "fastapi-ec2"
+  }
 }
 
 resource "aws_lb" "nlb" {
@@ -344,19 +363,32 @@ resource "aws_instance" "react_ec2" {
 
   user_data = <<-EOF
               #!/bin/bash
+              set -e
+
+              # Update system
               yum update -y
-              amazon-linux-extras install docker git -y
+
+              # Enable docker and install it
+              amazon-linux-extras enable docker
+              yum install -y docker git
+
+              # Start Docker and add ec2-user to docker group
               service docker start
               usermod -aG docker ec2-user
 
+              # Wait to ensure ec2-user is ready
+              sleep 10
+
+              # Clone the repo
+              sudo -u ec2-user bash <<'EOC'
               cd /home/ec2-user
 
               if [ ! -d app ]; then
                 git clone https://github.com/Siva-2707/DalFitBot.git app
               fi
 
-              # Make sure the app directory exists before creating .env
-              cat > /home/ec2-user/app/.env <<EOL
+              # Create frontend .env
+              cat > /home/ec2-user/app/frontend/.env <<EOL
               REACT_APP_AWS_REGION=${var.aws_region}
               REACT_APP_USER_POOL_ID=${aws_cognito_user_pool.chat_user_pool.id}
               REACT_APP_USER_POOL_CLIENT_ID=${aws_cognito_user_pool_client.chat_client.id}
@@ -365,24 +397,22 @@ resource "aws_instance" "react_ec2" {
               REACT_APP_REDIRECT_SIGN_OUT=http://$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4):80/
               EOL
 
-              chown ec2-user:ec2-user /home/ec2-user/app/frontend/.env
-
               cd /home/ec2-user/app/frontend
 
               # Build Docker image
               docker build -t react-frontend .
 
-              # Stop and remove any existing container named react-frontend
+              # Run container
               docker rm -f react-frontend || true
-
-              # Run the container mapping port 80
               docker run -d --name react-frontend -p 80:80 react-frontend
+              EOC
               EOF
 
   tags = {
     Name = "react-ec2"
   }
 }
+
 
 
 output "user_pool_id" {
@@ -399,4 +429,8 @@ output "region" {
 
 output "cognito_domain" {
   value = aws_cognito_user_pool_domain.my_domain.domain
+}
+
+output "react" {
+  value = aws_instance.react_ec2.public_dns
 }
