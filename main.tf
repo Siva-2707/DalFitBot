@@ -213,6 +213,36 @@ resource "aws_apigatewayv2_stage" "http_stage" {
 
 resource "aws_cognito_user_pool" "chat_user_pool" {
   name = "chat-app-user-pool"
+  username_attributes = ["email"]  # Use email as the username
+
+  auto_verified_attributes = ["email"]  # ✅ Enables email verification
+
+  schema {
+    attribute_data_type      = "String"
+    name                     = "email"
+    required                 = true      # ✅ Email is required
+    developer_only_attribute = false
+    mutable                  = true
+    string_attribute_constraints {
+      min_length = 5
+      max_length = 50
+    }
+  }
+
+  verification_message_template {
+    default_email_option = "CONFIRM_WITH_CODE"
+    email_subject        = "Verify your email for MyApp"
+    email_message        = "Your verification code is {####}"
+  }
+
+  mfa_configuration = "OFF"
+
+  account_recovery_setting {
+    recovery_mechanism {
+      name     = "verified_email"
+      priority = 1
+    }
+  }
 }
 
 resource "aws_cognito_user_pool_domain" "my_domain" {
@@ -224,10 +254,13 @@ resource "aws_cognito_user_pool_client" "chat_client" {
   name                          = "chat-app-client"
   user_pool_id                  = aws_cognito_user_pool.chat_user_pool.id
   generate_secret               = false
-  allowed_oauth_flows           = ["code"]
-  allowed_oauth_scopes          = ["email", "openid", "profile"]
-  callback_urls                 = ["http://localhost:5173"]
-  allowed_oauth_flows_user_pool_client = true
+  explicit_auth_flows           = [ "ALLOW_USER_PASSWORD_AUTH", "ALLOW_REFRESH_TOKEN_AUTH", "ALLOW_USER_SRP_AUTH", "ALLOW_CUSTOM_AUTH",]
+  prevent_user_existence_errors = "ENABLED"
+  # allowed_oauth_flows           = ["code"]
+  # allowed_oauth_scopes          = ["email", "openid", "profile"]
+  callback_urls                 = ["http://localhost:8080"] # Replace with your actual callback URL
+  logout_urls                   = ["http://localhost:8080"]
+  # allowed_oauth_flows_user_pool_client = true
   supported_identity_providers  = ["COGNITO"]
 }
 
@@ -389,12 +422,13 @@ resource "aws_instance" "react_ec2" {
 
               # Create frontend .env
               cat > /home/ec2-user/app/frontend/.env <<EOL
-              REACT_APP_AWS_REGION=${var.aws_region}
-              REACT_APP_USER_POOL_ID=${aws_cognito_user_pool.chat_user_pool.id}
-              REACT_APP_USER_POOL_CLIENT_ID=${aws_cognito_user_pool_client.chat_client.id}
-              REACT_APP_COGNITO_DOMAIN=${aws_cognito_user_pool_domain.my_domain.domain}
-              REACT_APP_REDIRECT_SIGN_IN=http://$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4):80/
-              REACT_APP_REDIRECT_SIGN_OUT=http://$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4):80/
+              VITE_AWS_REGION=${var.aws_region}
+              VITE_USER_POOL_ID=${aws_cognito_user_pool.chat_user_pool.id}
+              VITE_USER_POOL_CLIENT_ID=${aws_cognito_user_pool_client.chat_client.id}
+              VITE_COGNITO_DOMAIN=${aws_cognito_user_pool_domain.my_domain.domain}
+              VITE_CHAT_API_URL=${aws_instance.fastapi_ec2.private_ip}
+              VITE_REDIRECT_SIGN_IN=http://$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4):80/
+              VITE_REDIRECT_SIGN_OUT=http://$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4):80/
               EOL
 
               cd /home/ec2-user/app/frontend

@@ -40,10 +40,11 @@ def ask_ollama(query):
     try:
         response = requests.post(
             "http://ollama:11434/api/chat",
+            # "http://localhost:11434/api/chat",
             json={
-                "model": "llama3",  # or your ollama model name
+                "model": "llama3", 
                 "messages": [{"role": "user", "content": prompt}],
-                "stream": False  # Set to True if you want to stream
+                "stream": False
             }
         )
     except requests.exceptions.RequestException as e:

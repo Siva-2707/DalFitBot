@@ -5,7 +5,21 @@ import Chatbot from "./Chatbot";
 
 function App() {
   return (
-    <Authenticator>
+    <Authenticator
+      formFields={{
+        signUp: {
+        email: {
+          label: "Email",
+          placeholder: "you@example.com",
+          isRequired: true,
+        },
+        password: {
+          label: "Password",
+          isRequired: true,
+        },
+      },
+      }}
+    >
       {({ signOut, user }) => (
         <div style={{ padding: "1rem" }}>
           <header style={{ display: "flex", justifyContent: "space-between" }}>
@@ -16,6 +30,7 @@ function App() {
         </div>
       )}
     </Authenticator>
+    // <Chatbot user={"siva"} />
   );
 }
 

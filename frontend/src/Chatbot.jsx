@@ -4,28 +4,34 @@ import { fetchAuthSession } from '@aws-amplify/auth';
 function Chatbot({ user }) {
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState([]);
+  const [loading, setLoading] = useState(false);
 
   const sendMessage = async () => {
     const session = await fetchAuthSession();
     const token = session.getIdToken().getJwtToken();
+    setLoading(true);
 
-    const response = await fetch(`${process.env.REACT_APP_CHAT_API_URL}/chat`, {
+    const response = await fetch(`${import.meta.env.VITE_CHAT_API_URL}/chat`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: token,
       },
-      body: JSON.stringify({ message: input }),
+      body: JSON.stringify({ query : input }),
     });
 
     const data = await response.json();
-    setMessages([...messages, { user: input, bot: data.reply }]);
+    console.log("Response from API:", data);
+    
+    setMessages([...messages, { user: input, bot: data.answer }]);
     setInput("");
+    setLoading(false);
   };
 
   return (
     <div>
       <div style={{ marginBottom: "1rem" }}>
+        {loading && <p>Loading...</p>}
         {messages.map((msg, idx) => (
           <div key={idx}>
             <p><strong>You:</strong> {msg.user}</p>
