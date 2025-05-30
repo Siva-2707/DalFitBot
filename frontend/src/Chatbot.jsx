@@ -7,15 +7,15 @@ function Chatbot({ user }) {
   const [loading, setLoading] = useState(false);
 
   const sendMessage = async () => {
-    const session = await fetchAuthSession();
-    const token = session.getIdToken().getJwtToken();
+    // const session = await fetchAuthSession();
+    // const token = session.getIdToken().getJwtToken();
     setLoading(true);
 
     const response = await fetch(`${import.meta.env.VITE_CHAT_API_URL}/chat`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: token,
+        // Authorization: token,
       },
       body: JSON.stringify({ query : input }),
     });
