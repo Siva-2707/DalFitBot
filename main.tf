@@ -426,7 +426,7 @@ resource "aws_instance" "react_ec2" {
               VITE_USER_POOL_ID=${aws_cognito_user_pool.chat_user_pool.id}
               VITE_USER_POOL_CLIENT_ID=${aws_cognito_user_pool_client.chat_client.id}
               VITE_COGNITO_DOMAIN=${aws_cognito_user_pool_domain.my_domain.domain}
-              VITE_CHAT_API_URL=${aws_instance.fastapi_ec2.private_ip}
+              VITE_CHAT_API_URL=http://${aws_instance.fastapi_ec2.private_ip}:8080
               VITE_REDIRECT_SIGN_IN=http://$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4):80/
               VITE_REDIRECT_SIGN_OUT=http://$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4):80/
               EOL
