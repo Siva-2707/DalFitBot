@@ -155,7 +155,7 @@ resource "aws_lb" "nlb" {
 
 resource "aws_lb_target_group" "tg" {
   name        = "fastapi-tg"
-  port        = 80
+  port        = 8080
   protocol    = "TCP"
   target_type = "instance"
   vpc_id      = aws_vpc.main.id
@@ -164,7 +164,7 @@ resource "aws_lb_target_group" "tg" {
 resource "aws_lb_target_group_attachment" "tg_attachment" {
   target_group_arn = aws_lb_target_group.tg.arn
   target_id        = aws_instance.fastapi_ec2.id
-  port             = 80
+  port             = 8080
 }
 
 resource "aws_lb_listener" "nlb_listener" {
@@ -184,32 +184,32 @@ resource "aws_apigatewayv2_vpc_link" "vpc_link" {
   security_group_ids = [aws_security_group.ec2_sg.id]
 }
 
-resource "aws_apigatewayv2_api" "http_api" {
-  name          = "fastapi-http-api"
-  protocol_type = "HTTP"
-}
+# resource "aws_apigatewayv2_api" "http_api" {
+#   name          = "fastapi-http-api"
+#   protocol_type = "HTTP"
+# }
 
-resource "aws_apigatewayv2_integration" "http_integration" {
-  api_id                 = aws_apigatewayv2_api.http_api.id
-  integration_type       = "HTTP_PROXY"
-  integration_uri        = aws_lb_listener.nlb_listener.arn
-  integration_method     = "ANY"
-  connection_type        = "VPC_LINK"
-  connection_id          = aws_apigatewayv2_vpc_link.vpc_link.id
-  payload_format_version = "1.0"
-}
+# resource "aws_apigatewayv2_integration" "http_integration" {
+#   api_id                 = aws_apigatewayv2_api.http_api.id
+#   integration_type       = "HTTP_PROXY"
+#   integration_uri        = aws_lb_listener.nlb_listener.arn
+#   integration_method     = "ANY"
+#   connection_type        = "VPC_LINK"
+#   connection_id          = aws_apigatewayv2_vpc_link.vpc_link.id
+#   payload_format_version = "1.0"
+# }
 
-resource "aws_apigatewayv2_route" "http_route" {
-  api_id    = aws_apigatewayv2_api.http_api.id
-  route_key = "ANY /{proxy+}"
-  target    = "integrations/${aws_apigatewayv2_integration.http_integration.id}"
-}
+# resource "aws_apigatewayv2_route" "http_route" {
+#   api_id    = aws_apigatewayv2_api.http_api.id
+#   route_key = "ANY /{proxy+}"
+#   target    = "integrations/${aws_apigatewayv2_integration.http_integration.id}"
+# }
 
-resource "aws_apigatewayv2_stage" "http_stage" {
-  api_id      = aws_apigatewayv2_api.http_api.id
-  name        = "$default"
-  auto_deploy = true
-}
+# resource "aws_apigatewayv2_stage" "http_stage" {
+#   api_id      = aws_apigatewayv2_api.http_api.id
+#   name        = "$default"
+#   auto_deploy = true
+# }
 
 resource "aws_cognito_user_pool" "chat_user_pool" {
   name = "chat-app-user-pool"
@@ -301,57 +301,119 @@ resource "aws_wafv2_web_acl" "chat_acl" {
   }
 }
 
-resource "aws_api_gateway_rest_api" "chat_api" {
-  name = "chat-api"
+# HTTP API v2
+resource "aws_apigatewayv2_api" "http_api" {
+  name          = "fastapi-http-api"
+  protocol_type = "HTTP"
+
+  cors_configuration {
+    allow_origins = ["http://localhost:5173"]
+    allow_methods = ["GET", "POST", "OPTIONS"]
+    allow_headers = ["Authorization", "Content-Type"]
+    expose_headers = ["Authorization"]
+    max_age        = 3600
+  }
+
 }
 
-resource "aws_api_gateway_resource" "chat_resource" {
-  rest_api_id = aws_api_gateway_rest_api.chat_api.id
-  parent_id   = aws_api_gateway_rest_api.chat_api.root_resource_id
-  path_part   = "chat"
+# Cognito JWT Authorizer
+resource "aws_apigatewayv2_authorizer" "cognito_jwt" {
+  api_id          = aws_apigatewayv2_api.http_api.id
+  authorizer_type = "JWT"
+  identity_sources = ["$request.header.Authorization"]
+  name            = "cognito-jwt-authorizer"
+
+  jwt_configuration {
+    audience = [aws_cognito_user_pool_client.chat_client.id]  # Replace with your user pool client id
+    issuer   = "https://cognito-idp.${var.aws_region}.amazonaws.com/${aws_cognito_user_pool.chat_user_pool.id}"      # Replace with your user pool issuer URL
+  }
 }
 
-resource "aws_api_gateway_authorizer" "cognito_auth" {
-  name            = "chat-cognito-auth"
-  rest_api_id     = aws_api_gateway_rest_api.chat_api.id
-  type            = "COGNITO_USER_POOLS"
-  provider_arns   = [aws_cognito_user_pool.chat_user_pool.arn]
-  identity_source = "method.request.header.Authorization"
+# HTTP Integration with NLB Listener ARN (VPC_LINK)
+resource "aws_apigatewayv2_integration" "http_integration" {
+  api_id                 = aws_apigatewayv2_api.http_api.id
+  integration_type       = "HTTP_PROXY"
+  integration_uri        = aws_lb_listener.nlb_listener.arn   # NLB Listener ARN here
+  integration_method     = "ANY"
+  connection_type        = "VPC_LINK"
+  connection_id          = aws_apigatewayv2_vpc_link.vpc_link.id
+  payload_format_version = "1.0"
 }
 
-resource "aws_api_gateway_method" "chat_post" {
-  rest_api_id   = aws_api_gateway_rest_api.chat_api.id
-  resource_id   = aws_api_gateway_resource.chat_resource.id
-  http_method   = "POST"
-  authorization = "COGNITO_USER_POOLS"
-  authorizer_id = aws_api_gateway_authorizer.cognito_auth.id
+# Route using JWT Authorizer and Integration
+resource "aws_apigatewayv2_route" "http_route" {
+  api_id            = aws_apigatewayv2_api.http_api.id
+  route_key         = "POST /chat"                          # Adjust path here if needed
+  target            = "integrations/${aws_apigatewayv2_integration.http_integration.id}"
+  authorization_type = "JWT"
+  authorizer_id      = aws_apigatewayv2_authorizer.cognito_jwt.id
 }
 
-resource "aws_api_gateway_integration" "chat_integration" {
-  rest_api_id             = aws_api_gateway_rest_api.chat_api.id
-  resource_id             = aws_api_gateway_resource.chat_resource.id
-  http_method             = aws_api_gateway_method.chat_post.http_method
-  integration_http_method = "POST"
-  type                    = "HTTP"
-  uri                     = "http://${aws_lb.nlb.dns_name}/chat"
+# Default Stage with auto deployment
+resource "aws_apigatewayv2_stage" "http_stage" {
+  api_id      = aws_apigatewayv2_api.http_api.id
+  name        = "$default"
+  auto_deploy = true
 }
 
-resource "aws_api_gateway_deployment" "chat_deploy" {
-  depends_on  = [aws_api_gateway_integration.chat_integration]
-  rest_api_id = aws_api_gateway_rest_api.chat_api.id
-  # stage_name  = "prod"
-}
 
-resource "aws_api_gateway_stage" "chat_stage" {
-  rest_api_id  = aws_api_gateway_rest_api.chat_api.id
-  stage_name   = "prod"
-  deployment_id = aws_api_gateway_deployment.chat_deploy.id
-}
+# resource "aws_api_gateway_rest_api" "chat_api" {
+#   name = "chat-api"
+# }
 
-resource "aws_wafv2_web_acl_association" "api_waf_attach" {
-  resource_arn = aws_api_gateway_stage.chat_stage.arn
-  web_acl_arn  = aws_wafv2_web_acl.chat_acl.arn
-}
+# resource "aws_api_gateway_resource" "chat_resource" {
+#   rest_api_id = aws_api_gateway_rest_api.chat_api.id
+#   parent_id   = aws_api_gateway_rest_api.chat_api.root_resource_id
+#   path_part   = "chat"
+# }
+
+# resource "aws_api_gateway_authorizer" "cognito_auth" {
+#   name            = "chat-cognito-auth"
+#   rest_api_id     = aws_api_gateway_rest_api.chat_api.id
+#   type            = "COGNITO_USER_POOLS"
+#   provider_arns   = [aws_cognito_user_pool.chat_user_pool.arn]
+#   identity_source = "method.request.header.Authorization"
+# }
+
+# resource "aws_api_gateway_method" "chat_post" {
+#   rest_api_id   = aws_api_gateway_rest_api.chat_api.id
+#   resource_id   = aws_api_gateway_resource.chat_resource.id
+#   http_method   = "POST"
+#   authorization = "COGNITO_USER_POOLS"
+#   authorizer_id = aws_api_gateway_authorizer.cognito_auth.id
+# }
+
+# resource "aws_api_gateway_integration" "chat_integration" {
+#   rest_api_id             = aws_api_gateway_rest_api.chat_api.id
+#   resource_id             = aws_api_gateway_resource.chat_resource.id
+#   http_method             = aws_api_gateway_method.chat_post.http_method
+#   integration_http_method = "POST"
+#   type                    = "HTTP"
+#   uri                     = "http://${aws_lb.nlb.dns_name}/chat"
+# }
+
+# resource "aws_api_gateway_deployment" "chat_deploy" {
+#   depends_on  = [aws_api_gateway_integration.chat_integration]
+#   rest_api_id = aws_api_gateway_rest_api.chat_api.id
+#   # stage_name  = "prod"
+# }
+
+# resource "aws_api_gateway_stage" "chat_stage" {
+#   rest_api_id  = aws_api_gateway_rest_api.chat_api.id
+#   stage_name   = "prod"
+#   deployment_id = aws_api_gateway_deployment.chat_deploy.id
+# }
+
+# resource "aws_wafv2_web_acl_association" "api_waf_attach" {
+#   resource_arn = aws_api_gateway_stage.chat_stage.arn
+#   web_acl_arn  = aws_wafv2_web_acl.chat_acl.arn
+# }
+
+# resource "aws_wafv2_web_acl_association" "api_waf_attach" {
+#   resource_arn = "arn:aws:apigateway:${var.aws_region}::/restapis/${aws_apigatewayv2_api.http_api.id}/stages/${aws_apigatewayv2_stage.http_stage.name}"
+#   web_acl_arn  = aws_wafv2_web_acl.chat_acl.arn
+# }
+
 
 # New Security Group for React EC2 allowing HTTP inbound from anywhere
 resource "aws_security_group" "react_ec2_sg" {
@@ -426,7 +488,7 @@ resource "aws_instance" "react_ec2" {
               VITE_USER_POOL_ID=${aws_cognito_user_pool.chat_user_pool.id}
               VITE_USER_POOL_CLIENT_ID=${aws_cognito_user_pool_client.chat_client.id}
               VITE_COGNITO_DOMAIN=${aws_cognito_user_pool_domain.my_domain.domain}
-              VITE_CHAT_API_URL=http://${aws_instance.fastapi_ec2.private_ip}:8080
+              VITE_CHAT_API_URL=${aws_apigatewayv2_api.http_api.api_endpoint}
               VITE_REDIRECT_SIGN_IN=http://$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4):80/
               VITE_REDIRECT_SIGN_OUT=http://$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4):80/
               EOL
@@ -467,4 +529,9 @@ output "cognito_domain" {
 
 output "react" {
   value = aws_instance.react_ec2.public_dns
+}
+
+output "http_api_url" {
+  value = aws_apigatewayv2_api.http_api.api_endpoint
+  description = "The base URL of the deployed HTTP API"
 }

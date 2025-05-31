@@ -7,15 +7,20 @@ function Chatbot({ user }) {
   const [loading, setLoading] = useState(false);
 
   const sendMessage = async () => {
-    // const session = await fetchAuthSession();
-    // const token = session.getIdToken().getJwtToken();
+    const session = await fetchAuthSession();
+    console.log("User session:", session);
+    const idToken = session.tokens?.idToken?.toString();
+    console.log("ID Token:", idToken);
+
+    if (!idToken) throw new Error("Failed to get ID token");
+
     setLoading(true);
 
     const response = await fetch(`${import.meta.env.VITE_CHAT_API_URL}/chat`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        // Authorization: token,
+        "Authorization": `Bearer ${idToken}`,
       },
       body: JSON.stringify({ query : input }),
     });
