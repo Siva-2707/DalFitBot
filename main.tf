@@ -307,7 +307,7 @@ resource "aws_apigatewayv2_api" "http_api" {
   protocol_type = "HTTP"
 
   cors_configuration {
-    allow_origins = ["http://localhost:5173"]
+    allow_origins = ["*"]  # Adjust to your React app's URL
     allow_methods = ["GET", "POST", "OPTIONS"]
     allow_headers = ["Authorization", "Content-Type"]
     expose_headers = ["Authorization"]
