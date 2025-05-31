@@ -42,10 +42,11 @@ def ask_ollama(query):
             "http://ollama:11434/api/chat",
             # "http://localhost:11434/api/chat",
             json={
-                "model": "llama3", 
+                "model": "tinyllama", 
                 "messages": [{"role": "user", "content": prompt}],
                 "stream": False
-            }
+            },
+            timeout=20
         )
     except requests.exceptions.RequestException as e:
         print(f"Error connecting to Ollama: {e}")
