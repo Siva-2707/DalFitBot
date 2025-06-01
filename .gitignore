@@ -6,3 +6,5 @@ terraform.tfstate.backup
 .terraform*
 .DS_Store
 __pycache__/
+
+architecture.png

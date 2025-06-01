@@ -1,13 +1,16 @@
+#Variables
 variable "aws_region" {
   description = "AWS region to deploy resources"
   type        = string
   default     = "us-east-1"
 }
 
+#Provider Configuration
 provider "aws" {
   region     = var.aws_region
 }
 
+#Network Configuration
 resource "aws_vpc" "main" {
   cidr_block           = "10.0.0.0/16"
   enable_dns_hostnames = true
@@ -58,6 +61,19 @@ resource "aws_security_group" "ec2_sg" {
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
+  ingress {
+  from_port   = 8080
+  to_port     = 8080
+  protocol    = "tcp"
+  cidr_blocks = ["0.0.0.0/0"]
+}
+
+  ingress{
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
 
   egress {
     from_port   = 0
@@ -100,12 +116,24 @@ resource "aws_route_table_association" "private" {
   route_table_id = aws_route_table.private.id
 }
 
+resource "aws_key_pair" "dalfitbot_key" {
+  key_name   = "dalfitbot-key"
+  public_key = file("~/.ssh/dalfitbot-key.pub") # or any valid public key path
+}
+
 resource "aws_instance" "fastapi_ec2" {
   ami                         = data.aws_ami.amazon_linux.id
-  instance_type               = "t3.large"
+  instance_type               = "c7a.large"
   subnet_id                   = aws_subnet.private.id
   vpc_security_group_ids      = [aws_security_group.ec2_sg.id]
   associate_public_ip_address = false
+  key_name                    = aws_key_pair.dalfitbot_key.key_name
+  monitoring                  = true
+
+  root_block_device {
+    volume_size = 32
+    volume_type = "gp2"
+  }
 
   user_data = <<-EOF
               #!/bin/bash
@@ -118,17 +146,19 @@ resource "aws_instance" "fastapi_ec2" {
               amazon-linux-extras enable docker
               yum install -y docker git
 
-              # Start Docker and add ec2-user to docker group
-              service docker start
+              # Start Docker and enable on boot
+              systemctl start docker
+              systemctl enable docker
+
+              # Add ec2-user to the docker group
               usermod -aG docker ec2-user
 
               # Install Docker Compose
-              curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" \
-                -o /usr/local/bin/docker-compose
+              curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
               chmod +x /usr/local/bin/docker-compose
 
-              # Run as ec2-user
-              sudo -u ec2-user bash -c '
+              # Run app setup as ec2-user
+              runuser -l ec2-user -c '
                 cd /home/ec2-user
 
                 if [ ! -d app ]; then
@@ -144,21 +174,40 @@ resource "aws_instance" "fastapi_ec2" {
   tags = {
     Name = "fastapi-ec2"
   }
+
+  depends_on = [
+    aws_internet_gateway.gw,
+    aws_nat_gateway.this,
+    aws_route_table.private,
+    aws_subnet.private
+  ]
 }
+
 
 resource "aws_lb" "nlb" {
   name               = "fastapi-nlb"
   internal           = false
   load_balancer_type = "network"
-  subnets            = [aws_subnet.public.id]
+  # subnets            = [aws_subnet.public.id]
+  subnets            = [aws_subnet.private.id]
 }
 
 resource "aws_lb_target_group" "tg" {
   name        = "fastapi-tg"
-  port        = 8080
+  port        = 80
+  # port        = 8080
   protocol    = "TCP"
   target_type = "instance"
   vpc_id      = aws_vpc.main.id
+
+  health_check {
+    protocol            = "TCP"
+    port                = "8080"
+    healthy_threshold   = 2
+    unhealthy_threshold = 2
+    timeout             = 5
+    interval            = 10
+  }
 }
 
 resource "aws_lb_target_group_attachment" "tg_attachment" {
@@ -180,7 +229,8 @@ resource "aws_lb_listener" "nlb_listener" {
 
 resource "aws_apigatewayv2_vpc_link" "vpc_link" {
   name               = "fastapi-vpc-link"
-  subnet_ids         = [aws_subnet.public.id]
+  # subnet_ids         = [aws_subnet.public.id]
+  subnet_ids         = [aws_subnet.private.id]
   security_group_ids = [aws_security_group.ec2_sg.id]
 }
 
@@ -231,7 +281,7 @@ resource "aws_cognito_user_pool" "chat_user_pool" {
 
   verification_message_template {
     default_email_option = "CONFIRM_WITH_CODE"
-    email_subject        = "Verify your email for MyApp"
+    email_subject        = "Verify your email for DalFitBot"
     email_message        = "Your verification code is {####}"
   }
 
@@ -333,7 +383,7 @@ resource "aws_apigatewayv2_authorizer" "cognito_jwt" {
 resource "aws_apigatewayv2_integration" "http_integration" {
   api_id                 = aws_apigatewayv2_api.http_api.id
   integration_type       = "HTTP_PROXY"
-  integration_uri        = aws_lb_listener.nlb_listener.arn   # NLB Listener ARN here
+  integration_uri        = aws_lb_listener.nlb_listener.arn
   integration_method     = "ANY"
   connection_type        = "VPC_LINK"
   connection_id          = aws_apigatewayv2_vpc_link.vpc_link.id
@@ -343,7 +393,8 @@ resource "aws_apigatewayv2_integration" "http_integration" {
 # Route using JWT Authorizer and Integration
 resource "aws_apigatewayv2_route" "http_route" {
   api_id            = aws_apigatewayv2_api.http_api.id
-  route_key         = "POST /chat"                          # Adjust path here if needed
+  route_key = "ANY /{proxy+}"
+  # route_key         = "POST /chat"
   target            = "integrations/${aws_apigatewayv2_integration.http_integration.id}"
   authorization_type = "JWT"
   authorizer_id      = aws_apigatewayv2_authorizer.cognito_jwt.id
@@ -455,6 +506,7 @@ resource "aws_instance" "react_ec2" {
   subnet_id                   = aws_subnet.public.id
   vpc_security_group_ids      = [aws_security_group.react_ec2_sg.id]
   associate_public_ip_address = true
+  key_name                    = aws_key_pair.dalfitbot_key.key_name   
 
   user_data = <<-EOF
               #!/bin/bash
@@ -508,6 +560,69 @@ resource "aws_instance" "react_ec2" {
     Name = "react-ec2"
   }
 }
+
+# Monitoring configurations
+
+resource "aws_cloudwatch_log_group" "ec2_log_group" {
+  name              = "/ec2/fastapi"
+  retention_in_days = 7
+}
+
+resource "aws_cloudwatch_metric_alarm" "ec2_cpu_high" {
+  alarm_name          = "HighCPUUsage"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 2
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/EC2"
+  period              = 60
+  statistic           = "Average"
+  threshold           = 80
+  alarm_description   = "Triggered when EC2 CPU exceeds 80%"
+  actions_enabled     = false  # Set true if using SNS to notify
+  dimensions = {
+    InstanceId = aws_instance.fastapi_ec2.id
+  }
+}
+
+resource "aws_cloudwatch_dashboard" "main_dashboard" {
+  dashboard_name = "DalFitBotDashboard"
+
+  dashboard_body = jsonencode({
+    widgets = [
+      {
+        type = "metric",
+        x = 0,
+        y = 0,
+        width = 12,
+        height = 6,
+        properties = {
+          metrics = [
+            [ "AWS/EC2", "CPUUtilization", "InstanceId", aws_instance.fastapi_ec2.id ]
+          ],
+          view = "timeSeries",
+          region = var.aws_region,
+          title = "EC2 CPU Usage"
+        }
+      },
+      # {
+      #   type = "metric",
+      #   x = 0,
+      #   y = 6,
+      #   width = 12,
+      #   height = 6,
+      #   properties = {
+      #     metrics = [
+      #       [ "AWS/NetworkELB", "TargetResponseTime", "LoadBalancer", aws_lb.nlb.name ]
+      #     ],
+      #     view = "timeSeries",
+      #     region = var.aws_region,
+      #     title = "NLB Target Response Time"
+      #   }
+      # }
+    ]
+  })
+}
+
 
 
 

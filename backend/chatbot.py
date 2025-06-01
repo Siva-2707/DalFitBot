@@ -46,7 +46,7 @@ def ask_ollama(query):
                 "messages": [{"role": "user", "content": prompt}],
                 "stream": False
             },
-            timeout=20
+            # timeout=20
         )
     except requests.exceptions.RequestException as e:
         print(f"Error connecting to Ollama: {e}")
